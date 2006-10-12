@@ -7,21 +7,10 @@
 require 'gtk2'
 
 module Gtk
-  def self.refresh
-    Gtk.main_iteration while Gtk.events_pending?
-  end
-
-  def self.idle
-    Gtk.idle_add do
-      yield
-      false
-    end
-  end
-
   class MPlayerEmbed < EventBox
     INPUT_PATHS = [ ENV['HOME'] + '/.mplayer/input.conf',
                     '/etc/mplayer/input.conf', ]
-    KEYVALS = {
+    KEYCODES = {
       'space'     => 32,
       'bs'        => 65288,
       'enter'     => 65293,
@@ -36,11 +25,6 @@ module Gtk
       'del'       => 65535,
     }
 
-    ALIASES = {
-      :play => :loadfile,
-      :stop => :quit,
-    }
-
     attr_accessor :mplayer_path
     attr_accessor :mplayer_options
 
@@ -48,18 +32,17 @@ module Gtk
       @mplayer_path = path
       @mplayer_options = options
       @bindings = {}
-      @answers = {}
-      @commands = {}
 
       load_bindings
-      load_commands
 
       super()
       modify_bg(Gtk::STATE_NORMAL, style.black)
       signal_connect('key-press-event') do |w, event|
         puts "#{Gdk::Keyval.to_name(event.keyval)} => #{event.keyval}"
-        if command = @bindings[event.keyval]
-          send_command(command)
+        case command = @bindings[event.keyval]
+        when 'vo_fullscreen': fullscreen
+        else
+            thread :run, command
         end
       end
 
@@ -73,26 +56,44 @@ module Gtk
       @aspect << @socket
     end
 
-    def method_missing(symbol, *args)
-      symbol = ALIASES.fetch(symbol, symbol)
-      if @commands.include? symbol
-        range = @commands[symbol]
-        if range.include? args.size
-          puts "#{symbol} is fine"
-          args = args.map { |i| i.inspect }.join ' '
-          send_command("#{symbol} #{args}")
-        else
-          raise ArgumentError, "command #{symbol} takes #{range} arguments."
-        end
+    def fullscreen
+      if @window and toplevel == @window
+        reparent(@old_widget)
+        @window.destroy
       else
-        super
+        @old_widget = parent
+        @window = Gtk::Window.new
+        @window.fullscreen
+        @window.show_all
+        reparent(@window)
+      end
+      grab_focus
+    end
+
+    def thread(*args)
+      if @thread and not args.empty?
+        @thread.send(*args)
+      else
+        @thread
       end
     end
 
-    def send_command(command, open=true)
-      open_slave if open and not slave_alive?
-      puts "sending #{command.inspect}"
-      @pipe.write "#{command}\n"
+    def play(*files)
+      puts 'playing!!!'
+      open_thread unless thread :alive?
+      thread :run, :loadfile => files
+    end
+
+    def stop
+      thread :run, :quit
+    end
+
+    def kill
+      thread :kill
+    end
+
+    [ :pause, :mute, :switch_audio ].each do |cmd|
+      define_method(cmd) { thread :run, cmd }
     end
 
   private
@@ -103,7 +104,7 @@ module Gtk
           if line =~ /^([^# ]+) (.+)$/
             if $1.size == 1
               keyval = Gdk::Keyval.from_unicode $1
-            elsif not keyval = KEYVALS[$1.downcase]
+            elsif not keyval = KEYCODES[$1.downcase]
               keyval = Gdk::Keyval.from_name $1.capitalize
             end
             @bindings[keyval] = $2 if keyval > 0
@@ -112,40 +113,8 @@ module Gtk
       end
     end
 
-    def slave_alive?
-      @pipe.flush and true rescue false
-    end
-
-    def load_commands
-      pipe = IO.popen("#{@mplayer_path} -input cmdlist")
-      pipe.readlines.each do |line|
-        if match = /^([a-z_]+) +(.*)$/.match(line)
-          args = match[2].split
-          max = args.size
-          min = args.find_all { |i| i[0, 1] != '[' }.size
-          if methods.include? match[1]
-            puts "#{match[1]} is an instance method of #{self.inspect}"
-          elsif private_methods.include? match[1]
-            puts "#{match[1]} is a private method of #{self.inspect}"
-          end
-          @commands[match[1].to_sym] = min..max
-        end
-      end
-      pipe.close
-    end
-
-    def kill_slave
-      @thread.kill if @thread
-      if slave_alive?
-        @thread.kill if @thread
-        Process.kill 'TERM', @pipe.pid
-        Process.waitpid @pipe.pid
-        @pipe = nil
-      end
-    end
-
-    def open_slave
-      return if slave_alive?
+    def open_thread
+      return if thread :alive?
 
       x = @socket.allocation.width
       y = @socket.allocation.height
@@ -153,35 +122,104 @@ module Gtk
             "-wid #{@socket.id} -geometry #{x}x#{y} #{@mplayer_options}"
       puts "opening slave with #{cmd}"
 
-      @pipe = IO.popen(cmd, 'a+')
-      @thread = Thread.new { slave_reader }
+      @thread = PlayerThread.new(cmd, @aspect)
+      @thread.signal_connect('aspect') do |thread, ratio|
+        @aspect.ratio = ratio
+      end
+      @thread.signal_connect('stopped') do
+        @thread = nil
+      end
     end
 
-    def slave_reader
-      until @pipe.eof? or @pipe.closed?
-        line = @pipe.readline.chomp
-        if line =~ /^([A-Z_]+)=(.+)$/
-          case $1
-          when /^ANS_([a-z_]+)=(.+)$/
-            @answers[$1] = $2
-          when 'ID_VIDEO_WIDTH'
-            @width = $2.to_f
-          when 'ID_VIDEO_HEIGHT'
-            @height = $2.to_f
-            puts "changing aspect ratio to #{@width / @height}"
-            Gtk.idle { @aspect.ratio = @width / @height } if @width
-          when 'ID_VIDEO_ASPECT'
-            unless (ratio = $2.to_f).zero?
-              puts "changing aspect ratio to #{ratio}"
-              Gtk.idle { @aspect.ratio = ratio }
+    class PlayerThread < GLib::Object
+      type_register
+      signal_new 'aspect',
+        GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], Float
+      signal_new 'stopped',
+        GLib::Signal::RUN_FIRST, nil, GLib::Type['void']
+
+      def initialize(command, aspect)
+        super()
+        @answers = {}
+        @aspect = aspect
+        @pipe = IO.popen(command, 'a+')
+        @thread = Thread.new { slave }
+      end
+
+      def slave
+        width = height = 0
+        until @pipe.eof? or @pipe.closed?
+          if @aspect.nil? or @aspect.destroyed?
+            kill
+            break
+          end
+          line = @pipe.readline.chomp
+          if match = /^([a-z_]+)=(.+)$/i.match(line)
+            key, value = match.captures
+            case key
+            when 'ID_VIDEO_WIDTH'
+              width = value.to_i if value
+            when 'ID_VIDEO_HEIGHT'
+              if width > 0 and (height = value.to_f) > 0
+                puts "changing aspect ratio to #{width / height}"
+                signal_emit 'aspect', width / height
+              end
+            when 'ID_VIDEO_ASPECT'
+              unless (ratio = value.to_f).zero?
+                puts "changing aspect ratio to #{ratio}"
+                signal_emit 'aspect', ratio
+              end
+            when /^ANS_([a-z_]+)$/i
+              puts 'sali'
+              @answers[key] = value
+              puts value
             end
           end
         end
+      ensure
+        @pipe.close if @pipe
+        @pipe = nil
+        puts 'Thread is done.'
+        signal_emit 'stopped'
       end
-    ensure
-      @pipe.close if @pipe
-      @pipe = nil
-      puts 'Thread is done.'
+
+      def alive?
+        @pipe.flush and true rescue false
+      end
+
+      def kill
+        puts 'killing'
+        Process.kill 'INT', @pipe.pid if alive?
+        @thread.join if @thread
+        @thread = nil
+        @pipe = nil
+      end
+
+      def run(cmd)
+        if cmd.is_a? Hash and cmd.values.first.is_a? Array
+          args = cmd.values.first.map { |a| a.inspect}
+          command = "#{cmd.keys.first} #{args.join ' '}"
+          #command, args = cmd.entries.first
+          open if cmd[:open] and not alive?
+        else
+          command = cmd
+        end
+        if alive?
+          puts "sending #{command.inspect}"
+          @pipe.write "#{command}\n"
+        end
+      end
+
+    private
+      def signal_do_aspect(aspect) end
+      def signal_do_stopped() end
+    end
+  end
+
+  def self.idle
+    Gtk.idle_add do
+      yield
+      false
     end
   end
 end

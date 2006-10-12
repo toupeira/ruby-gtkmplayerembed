@@ -13,6 +13,9 @@ class Window < Gtk::Window
     signal_connect('map-event') do
       @mplayer.play '/mnt/sda3/movies/Three Kings (1999).ogm'
     end
+    signal_connect('key-press-event') do |win, event|
+      @mplayer.event(event)
+    end
 
     vbox = Gtk::VBox.new
     modify_bg(Gtk::STATE_NORMAL, style.black)
@@ -45,7 +48,7 @@ class Window < Gtk::Window
 
     button = Gtk::Button.new(Gtk::Stock::MEDIA_STOP)
     button.signal_connect('clicked') do
-      @mplayer.stop
+      @mplayer.kill
     end
     hbox << button
 
