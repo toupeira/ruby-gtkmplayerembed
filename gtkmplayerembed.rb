@@ -1,5 +1,12 @@
 =begin
 
+  Gtk::MPlayerEmbed - a widget for embedding MPlayer into GTK+ applications.
+  Copyright 2006 Markus Koller
+
+  This program is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License version 2 as
+  published by the Free Software Foundation.
+
   $Id$
 
 =end
@@ -8,41 +15,58 @@ require 'gtk2'
 
 module Gtk
   class MPlayerEmbed < EventBox
+    type_register
+    signal_new 'stopped',
+      GLib::Signal::RUN_FIRST, nil, GLib::Type['void']
+    signal_new 'length_changed',
+      GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], Integer
+    signal_new 'toggle_fullscreen',
+      GLib::Signal::RUN_FIRST, nil, GLib::Type['void']
+
     INPUT_PATHS = [ ENV['HOME'] + '/.mplayer/input.conf',
                     '/etc/mplayer/input.conf', ]
-    KEYCODES = {
-      'space'     => 32,
-      'bs'        => 65288,
-      'enter'     => 65293,
-      'esc'       => 65307,
-      'pgup'      => 65365,
-      'pgdwn'     => 65366,
-      'ins'       => 65379,
-      'kp_enter'  => 65421,
-      'kp_ins'    => 65438,
-      'kp_del'    => 65439,
-      'kp_dec'    => 65454,
-      'del'       => 65535,
+    KEYNAMES = {
+      'space'     => 'space',
+      'bs'        => 'BackSpace',
+      'enter'     => 'Return',
+      'esc'       => 'Escape',
+      'pgup'      => 'Prior',
+      'pgdwn'     => 'Next',
+      'ins'       => 'Insert',
+      'kp_enter'  => 'KP_Enter',
+      'kp_ins'    => 'KP_Insert',
+      'kp_del'    => 'KP_Delete',
+      'kp_dec'    => 'KP_Decimal',
+      'del'       => 'Delete',
     }
 
-    attr_accessor :mplayer_path
-    attr_accessor :mplayer_options
+    attr_accessor :mplayer_path, :mplayer_options, :mplayer_config
+    attr_reader :info
 
-    def initialize(path='mplayer', options=nil)
+    def initialize(path='mplayer', options=nil, config=nil)
       @mplayer_path = path
       @mplayer_options = options
+      @mplayer_config = config
       @bindings = {}
+
+      @info = {}
+      @answers = {}
 
       load_bindings
 
       super()
       modify_bg(Gtk::STATE_NORMAL, style.black)
+      set_can_focus(true)
+      signal_connect('enter-notify-event') { grab_focus }
       signal_connect('key-press-event') do |w, event|
         puts "#{Gdk::Keyval.to_name(event.keyval)} => #{event.keyval}"
         case command = @bindings[event.keyval]
-        when 'vo_fullscreen': fullscreen
+        when 'vo_fullscreen'
+          signal_emit 'toggle_fullscreen'
+        when /^vo_ontop/
+          toplevel.keep_above = true if toplevel
         else
-            thread :run, command
+          send_command command
         end
       end
 
@@ -56,47 +80,42 @@ module Gtk
       @aspect << @socket
     end
 
-    def fullscreen
-      if @window and toplevel == @window
-        reparent(@old_widget)
-        @window.destroy
-      else
-        @old_widget = parent
-        @window = Gtk::Window.new
-        @window.fullscreen
-        @window.show_all
-        reparent(@window)
-      end
-      grab_focus
-    end
-
-    def thread(*args)
-      if @thread and not args.empty?
-        @thread.send(*args)
-      else
-        @thread
-      end
-    end
-
-    def play(*files)
+    def play(files)
+      open_thread unless thread_alive?
+      send_command :loadfile => files
       puts 'playing!!!'
-      open_thread unless thread :alive?
-      thread :run, :loadfile => files
     end
 
     def stop
-      thread :run, :quit
+      send_command :quit
     end
 
-    def kill
-      thread :kill
+    def kill_thread
+      puts 'killing'
+      Process.kill 'INT', @pipe.pid if thread_alive?
+      @thread.join if @thread
+      @thread = nil
+      @pipe = nil
     end
 
     [ :pause, :mute, :switch_audio ].each do |cmd|
-      define_method(cmd) { thread :run, cmd }
+      define_method(cmd) { send_command cmd }
+    end
+
+    def ratio
+      @aspect.ratio
+    end
+
+    def ratio=(ratio)
+      @info[:ratio] = ratio
+      @aspect.ratio = ratio
     end
 
   private
+
+    def signal_do_length_changed(length) end
+    def signal_do_stopped() end
+    def signal_do_toggle_fullscreen() end
 
     def load_bindings
       if file = INPUT_PATHS.find { |f| File.readable? f }
@@ -104,7 +123,9 @@ module Gtk
           if line =~ /^([^# ]+) (.+)$/
             if $1.size == 1
               keyval = Gdk::Keyval.from_unicode $1
-            elsif not keyval = KEYCODES[$1.downcase]
+            elsif name = KEYNAMES[$1.downcase]
+              keyval = Gdk::Keyval.from_name name
+            else
               keyval = Gdk::Keyval.from_name $1.capitalize
             end
             @bindings[keyval] = $2 if keyval > 0
@@ -113,106 +134,90 @@ module Gtk
       end
     end
 
+    def thread_alive?
+      @pipe.flush and true rescue false
+    end
+
+    def send_command(cmd)
+      if cmd.is_a? Hash
+        if cmd.values.first.is_a? Array
+          args = cmd.values.first.map { |a| a.inspect}.join ' '
+        else
+          args = cmd.values.first.inspect
+        end
+        command = "#{cmd.keys.first} #{args}"
+        open_thread if cmd[:open] and not thread_alive?
+      else
+        command = cmd
+      end
+      if thread_alive?
+        puts "sending #{command.inspect}"
+        @pipe.write "#{command}\n"
+      end
+    end
+
     def open_thread
-      return if thread :alive?
+      return if thread_alive?
 
       x = @socket.allocation.width
       y = @socket.allocation.height
       cmd = "#{@mplayer_path} -slave -idle -quiet -identify " +
+            "#{'-include '+@mplayer_config if @mplayer_config}" +
             "-wid #{@socket.id} -geometry #{x}x#{y} #{@mplayer_options}"
       puts "opening slave with #{cmd}"
 
-      @thread = PlayerThread.new(cmd, @aspect)
-      @thread.signal_connect('aspect') do |thread, ratio|
-        @aspect.ratio = ratio
-      end
-      @thread.signal_connect('stopped') do
-        @thread = nil
-      end
+      @answers = {}
+      @pipe = IO.popen(cmd, 'a+')
+      @thread = Thread.new { slave_reader }
+      #Gtk.timeout_add(1000) do
+      #  send_command 'pausing_keep get_time_pos'
+      #  puts @answers['TIME_POSITION']
+      #  thread_alive?
+      #end
     end
 
-    class PlayerThread < GLib::Object
-      type_register
-      signal_new 'aspect',
-        GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], Float
-      signal_new 'stopped',
-        GLib::Signal::RUN_FIRST, nil, GLib::Type['void']
-
-      def initialize(command, aspect)
-        super()
-        @answers = {}
-        @aspect = aspect
-        @pipe = IO.popen(command, 'a+')
-        @thread = Thread.new { slave }
-      end
-
-      def slave
-        width = height = 0
-        until @pipe.eof? or @pipe.closed?
-          if @aspect.nil? or @aspect.destroyed?
-            kill
-            break
-          end
-          line = @pipe.readline.chomp
-          if match = /^([a-z_]+)=(.+)$/i.match(line)
-            key, value = match.captures
-            case key
-            when 'ID_VIDEO_WIDTH'
-              width = value.to_i if value
-            when 'ID_VIDEO_HEIGHT'
-              if width > 0 and (height = value.to_f) > 0
-                puts "changing aspect ratio to #{width / height}"
-                signal_emit 'aspect', width / height
-              end
-            when 'ID_VIDEO_ASPECT'
-              unless (ratio = value.to_f).zero?
-                puts "changing aspect ratio to #{ratio}"
-                signal_emit 'aspect', ratio
-              end
-            when /^ANS_([a-z_]+)$/i
-              puts 'sali'
-              @answers[key] = value
-              puts value
+    def slave_reader
+      until @pipe.eof? or @pipe.closed?
+        if @aspect.nil? or @aspect.destroyed?
+          kill_slave
+          break
+        end
+        line = @pipe.readline.chomp
+        if match = /^([a-z_]+)=(.+)$/i.match(line)
+          puts line
+          key, value = match.captures
+          case key
+          when 'ID_FILENAME'
+            @info = { :file => File.basename(value), :width => 0 }
+          when 'ID_LENGTH'
+            @info[:length] = value.to_i
+            signal_emit 'length_changed', @info[:length]
+          when 'ID_VIDEO_WIDTH'
+            @info[:width] = value.to_i if value
+          when 'ID_VIDEO_HEIGHT'
+            if @info[:width] > 0 and (@info[:height] = value.to_f) > 0
+              Gtk.idle { self.ratio = @info[:width] / @info[:height] }
             end
+          when 'ID_VIDEO_ASPECT'
+            unless (ratio = value.to_f).zero?
+              puts "changing aspect ratio to #{ratio}"
+              Gtk.idle { self.ratio = ratio }
+            end
+          when /^ID_([a-z_]+)$/i
+            if value
+              @info[$1.downcase.to_sym] = value.to_i > 0 ? value.to_i : value
+            end
+          when /^ANS_([a-z_]+)$/i
+            @answers[$1] = value
           end
         end
-      ensure
-        @pipe.close if @pipe
-        @pipe = nil
-        puts 'Thread is done.'
-        signal_emit 'stopped'
       end
-
-      def alive?
-        @pipe.flush and true rescue false
-      end
-
-      def kill
-        puts 'killing'
-        Process.kill 'INT', @pipe.pid if alive?
-        @thread.join if @thread
-        @thread = nil
-        @pipe = nil
-      end
-
-      def run(cmd)
-        if cmd.is_a? Hash and cmd.values.first.is_a? Array
-          args = cmd.values.first.map { |a| a.inspect}
-          command = "#{cmd.keys.first} #{args.join ' '}"
-          #command, args = cmd.entries.first
-          open if cmd[:open] and not alive?
-        else
-          command = cmd
-        end
-        if alive?
-          puts "sending #{command.inspect}"
-          @pipe.write "#{command}\n"
-        end
-      end
-
-    private
-      def signal_do_aspect(aspect) end
-      def signal_do_stopped() end
+    ensure
+      @pipe.close if @pipe
+      @pipe = nil
+      @thread = nil
+      puts 'thread stopped.'
+      signal_emit 'stopped'
     end
   end
 
