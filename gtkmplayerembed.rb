@@ -53,20 +53,33 @@ module Gtk
       @answers = {}
 
       load_bindings
+      add_binding('i') do
+        next unless @info[:file]
+        pos = format_time(read_command(:get_time_pos, 'TIME_POSITION'))
+        length = format_time(@info[:length])
+        percent = read_command(:get_percent_pos, 'PERCENT_POSITION')
+        show_text "#{File.basename(@info[:file])}   #{pos} / #{length}   (#{percent}%)"
+      end
+      add_binding('c') do
+        show_text Time.now.strftime('%T')
+      end
 
       super()
       modify_bg(Gtk::STATE_NORMAL, style.black)
       set_can_focus(true)
       signal_connect('enter-notify-event') { grab_focus }
       signal_connect('key-press-event') do |w, event|
-        puts "#{Gdk::Keyval.to_name(event.keyval)} => #{event.keyval}"
+        key = Gdk::Keyval.to_name(event.keyval)
+        puts "#{key} => #{event.keyval}"
         case command = @bindings[event.keyval]
+        when Proc
+          command.call
         when 'vo_fullscreen'
           signal_emit 'toggle_fullscreen'
         when /^vo_ontop/
           toplevel.keep_above = true if toplevel
         else
-          send_command command
+          send_command(command) if command
         end
       end
 
@@ -90,6 +103,10 @@ module Gtk
       send_command :quit
     end
 
+    def show_text(text, time=2000)
+      send_command :osd_show_text => [ text, time ], :pausing => 'keep'
+    end
+
     def kill_thread
       puts 'killing'
       Process.kill 'INT', @pipe.pid if thread_alive?
@@ -111,49 +128,80 @@ module Gtk
       @aspect.ratio = ratio
     end
 
+    def send_command(*args)
+      command = nil
+      args.each do |value|
+        case value
+        when String, Symbol
+          command = value
+        when Hash
+          value.each do |key, value|
+            case key
+            when :open
+              open_thread
+            when :pausing
+              command = if value.is_a? String
+                "pausing_#{value} #{command}"
+              else
+                "pausing #{command}"
+              end
+            else
+              args = Array(value).map { |a| a.inspect }.join ' '
+              command = "#{key} #{args}"
+            end
+          end
+        end
+      end
+      raise ArgumentError, "invalid arguments" unless command
+      if thread_alive?
+        puts "sending #{command.inspect}"
+        @pipe.write "#{command}\n"
+      end
+    end
+
+    def read_command(command, key)
+      @answers.delete(key)
+      send_command command, :pausing => 'keep'
+      i = 0
+      sleep 0.01 until @answers[key] or (i += 1) > 10
+      @answers[key]
+    end
+
   private
 
     def signal_do_length_changed(length) end
     def signal_do_stopped() end
     def signal_do_toggle_fullscreen() end
 
+    def format_time(time)
+      time = time.to_i
+      "%02d:%02d:%02d" % [time / 3600, (time % 3600) / 60, time % 60]
+    end
+
     def load_bindings
       if file = INPUT_PATHS.find { |f| File.readable? f }
         File.readlines(file).each do |line|
           if line =~ /^([^# ]+) (.+)$/
-            if $1.size == 1
-              keyval = Gdk::Keyval.from_unicode $1
-            elsif name = KEYNAMES[$1.downcase]
-              keyval = Gdk::Keyval.from_name name
-            else
-              keyval = Gdk::Keyval.from_name $1.capitalize
-            end
-            @bindings[keyval] = $2 if keyval > 0
+            add_binding($1, $2)
           end
         end
       end
     end
 
-    def thread_alive?
-      @pipe.flush and true rescue false
+    def add_binding(key, command=nil, &block)
+      if key.size == 1
+        keyval = Gdk::Keyval.from_unicode(key)
+      elsif name = KEYNAMES[key.downcase]
+        keyval = Gdk::Keyval.from_name(name)
+      elsif (keyval = Gdk::Keyval.from_name(key)).zero?
+        keyval = Gdk::Keyval.from_name(key.capitalize)
+      end
+      command = block_given? ? block : command
+      @bindings[keyval] = command if keyval > 0
     end
 
-    def send_command(cmd)
-      if cmd.is_a? Hash
-        if cmd.values.first.is_a? Array
-          args = cmd.values.first.map { |a| a.inspect}.join ' '
-        else
-          args = cmd.values.first.inspect
-        end
-        command = "#{cmd.keys.first} #{args}"
-        open_thread if cmd[:open] and not thread_alive?
-      else
-        command = cmd
-      end
-      if thread_alive?
-        puts "sending #{command.inspect}"
-        @pipe.write "#{command}\n"
-      end
+    def thread_alive?
+      @pipe.flush and true rescue false
     end
 
     def open_thread
@@ -188,7 +236,7 @@ module Gtk
           key, value = match.captures
           case key
           when 'ID_FILENAME'
-            @info = { :file => File.basename(value), :width => 0 }
+            @info = { :file => value, :width => 0 }
           when 'ID_LENGTH'
             @info[:length] = value.to_i
             signal_emit 'length_changed', @info[:length]
