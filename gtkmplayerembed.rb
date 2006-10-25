@@ -12,16 +12,25 @@
 =end
 
 require 'gtk2'
+require 'tempfile'
 
 module Gtk
+  def self.idle
+    Gtk.idle_add { yield; false }
+  end
+
   class MPlayerEmbed < EventBox
     type_register
     signal_new 'stopped',
       GLib::Signal::RUN_FIRST, nil, GLib::Type['void']
+    signal_new 'file_changed',
+      GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], String
+    signal_new 'playlist_changed',
+      GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], Array
     signal_new 'length_changed',
       GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], Integer
-    signal_new 'toggle_fullscreen',
-      GLib::Signal::RUN_FIRST, nil, GLib::Type['void']
+    signal_new 'fullscreen_toggled',
+      GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], TrueClass
 
     INPUT_PATHS = [ ENV['HOME'] + '/.mplayer/input.conf',
                     '/etc/mplayer/input.conf', ]
@@ -40,42 +49,44 @@ module Gtk
       'del'       => 'Delete',
     }
 
-    attr_accessor :mplayer_path, :mplayer_options, :mplayer_config
-    attr_reader :info
+    attr_accessor :mplayer_path, :mplayer_options,
+                  :fullscreen_width, :fullscreen_height,
+                  :bg_color, :bg_logo, :bg_stripes, :bg_stripes_color
+    attr_reader :config, :file, :playlist
 
-    def initialize(path='mplayer', options=nil, config=nil)
+    def initialize(path='mplayer', options=nil)
       @mplayer_path = path
       @mplayer_options = options
-      @mplayer_config = config
-      @bindings = {}
 
-      @info = {}
+      @fullscreen_width = Gdk::Screen.default.width
+      @fullscreen_height = Gdk::Screen.default.height
+
+      @bg_color = Gdk::Color.parse('black')
+      @bg_stripes_color = Gdk::Color.parse('#333')
+
+      @file = {}
       @answers = {}
-
+      @bindings = {}
       load_bindings
-      add_binding('i') do
-        next unless @info[:file]
-        pos = format_time(read_command(:get_time_pos, 'TIME_POSITION'))
-        length = format_time(@info[:length])
-        percent = read_command(:get_percent_pos, 'PERCENT_POSITION')
-        show_text "#{File.basename(@info[:file])}   #{pos} / #{length}   (#{percent}%)"
-      end
-      add_binding('c') do
-        show_text Time.now.strftime('%T')
-      end
 
       super()
       modify_bg(Gtk::STATE_NORMAL, style.black)
       set_can_focus(true)
+      set_size_request(10, 10)
+
+      signal_connect('realize') { @aspect.hide }
+      signal_connect('expose-event') { draw_background }
       signal_connect('enter-notify-event') { grab_focus }
+      signal_connect('button-press-event') do |w, event|
+        toggle_fullscreen if event.button == 3
+      end
       signal_connect('key-press-event') do |w, event|
-        key = Gdk::Keyval.to_name(event.keyval)
-        puts "#{key} => #{event.keyval}"
+        puts "#{Gdk::Keyval.to_name event.keyval} => #{event.keyval}" if $DEBUG
         case command = @bindings[event.keyval]
         when Proc
           command.call
         when 'vo_fullscreen'
-          signal_emit 'toggle_fullscreen'
+          toggle_fullscreen
         when /^vo_ontop/
           toplevel.keep_above = true if toplevel
         else
@@ -88,15 +99,60 @@ module Gtk
       self << @aspect
 
       @socket = Gtk::Socket.new
-      @socket.set_size_request(1, 1)
       @socket.modify_bg(Gtk::STATE_NORMAL, style.black)
       @aspect << @socket
     end
 
+    def fullscreen?
+      @fs_window and toplevel == @fs_window
+    end
+
+    def fullscreen=(status)
+      toggle_fullscreen unless fullscreen? == status
+    end
+
+    def toggle_fullscreen
+      if fullscreen?
+        reparent(@parent)
+        @fs_window.destroy
+        @fs_window = nil
+      else
+        @parent = parent
+        @fs_window = Gtk::Window.new
+        @fs_window.modify_bg(Gtk::STATE_NORMAL, style.black)
+        @fs_window.fullscreen
+        @fs_window.signal_connect('key-press-event') do |win, event|
+          self.event(event)
+        end
+
+        align = Gtk::Alignment.new(0, 0, 1, 1)
+        @fs_window << align
+
+        screenx = Gdk::Screen.default.width
+        screeny = Gdk::Screen.default.height
+        width = @fullscreen_width || screenx
+        height = @fullscreen_height || screeny
+        width = [0, [screenx, width].min].max
+        height = [0, [screeny, height].min].max
+        align.set_right_padding(screenx - width)
+        align.set_bottom_padding(screeny - height)
+
+        @fs_window.show_all
+        reparent(align)
+      end
+      signal_emit 'fullscreen_toggled', fullscreen?
+    end
+
     def play(files)
-      open_thread unless thread_alive?
-      send_command :loadfile => files
-      puts 'playing!!!'
+      signal_emit 'playlist_changed', @playlist = Array(files)
+      @tmp = Tempfile.new('gtkmplayerembed')
+      @playlist.each { |f| @tmp.write("#{f}\n") }
+      @tmp.close
+      if thread_alive?
+        send_command :loadlist => @tmp.path
+      else
+        open_thread("-playlist #{@tmp.path}")
+      end
     end
 
     def stop
@@ -108,7 +164,6 @@ module Gtk
     end
 
     def kill_thread
-      puts 'killing'
       Process.kill 'INT', @pipe.pid if thread_alive?
       @thread.join if @thread
       @thread = nil
@@ -124,8 +179,23 @@ module Gtk
     end
 
     def ratio=(ratio)
-      @info[:ratio] = ratio
+      @file[:ratio] = ratio
       @aspect.ratio = ratio
+    end
+
+    def bg_color=(color)
+      color = Gdk::Color.parse(color) unless color.is_a? Gdk::Color
+      @bg_color = color
+    end
+
+    def bg_logo=(logo)
+      logo = Gdk::Pixbuf.new(logo) unless logo.is_a? Gdk::Pixbuf
+      @bg_logo = logo
+    end
+
+    def bg_stripes_color(color)
+      color = Gdk::Color.parse(color) unless color.is_a? Gdk::Color
+      @bg_stripes_color = color
     end
 
     def send_command(*args)
@@ -163,15 +233,26 @@ module Gtk
       @answers.delete(key)
       send_command command, :pausing => 'keep'
       i = 0
-      sleep 0.01 until @answers[key] or (i += 1) > 10
+      sleep 0.005 until @answers[key] or (i += 1) > 10
       @answers[key]
     end
 
   private
 
+    def signal_do_stopped
+      puts 'thread stopped.'
+      @pipe = nil
+      @thread = nil
+      @file = {}
+
+      @aspect.hide
+      toggle_fullscreen if fullscreen?
+    end
+
+    def signal_do_file_changed(file) end
+    def signal_do_playlist_changed(playlist) end
     def signal_do_length_changed(length) end
-    def signal_do_stopped() end
-    def signal_do_toggle_fullscreen() end
+    def signal_do_fullscreen_toggled(fullscreen) end
 
     def format_time(time)
       time = time.to_i
@@ -186,6 +267,16 @@ module Gtk
           end
         end
       end
+      add_binding('i') do
+        next unless @file[:path]
+        pos = format_time(read_command(:get_time_pos, 'TIME_POSITION'))
+        length = format_time(@file[:length])
+        percent = read_command(:get_percent_pos, 'PERCENT_POSITION')
+        show_text "#{File.basename(@file[:path])}   #{pos} / #{length}   (#{percent}%)"
+      end
+      add_binding('c') do
+        show_text Time.now.strftime('%T')
+      end
     end
 
     def add_binding(key, command=nil, &block)
@@ -196,35 +287,30 @@ module Gtk
       elsif (keyval = Gdk::Keyval.from_name(key)).zero?
         keyval = Gdk::Keyval.from_name(key.capitalize)
       end
-      command = block_given? ? block : command
+      command = block ? block : command
       @bindings[keyval] = command if keyval > 0
     end
 
     def thread_alive?
-      @pipe.flush and true rescue false
+      @thread and @pipe.flush and true rescue false
     end
 
-    def open_thread
+    def open_thread(options=nil)
       return if thread_alive?
-
+      @aspect.show_all
       x = @socket.allocation.width
       y = @socket.allocation.height
-      cmd = "#{@mplayer_path} -slave -idle -quiet -identify " +
-            "#{'-include '+@mplayer_config if @mplayer_config}" +
-            "-wid #{@socket.id} -geometry #{x}x#{y} #{@mplayer_options}"
-      puts "opening slave with #{cmd}"
-
-      @answers = {}
-      @pipe = IO.popen(cmd, 'a+')
-      @thread = Thread.new { slave_reader }
-      #Gtk.timeout_add(1000) do
-      #  send_command 'pausing_keep get_time_pos'
-      #  puts @answers['TIME_POSITION']
-      #  thread_alive?
-      #end
+      cmd = "#{@mplayer_path} -slave -quiet -identify " +
+            "-wid #{@socket.id} -geometry #{x}x#{y} " +
+            "#{options} #{@mplayer_options}"
+      puts @pipe
+      @thread = Thread.new { slave_reader(cmd) }
     end
 
-    def slave_reader
+    def slave_reader(command)
+      @answers = {}
+      puts "opening slave with #{command}"
+      @pipe = IO.popen(command, 'a+')
       until @pipe.eof? or @pipe.closed?
         if @aspect.nil? or @aspect.destroyed?
           kill_slave
@@ -232,19 +318,18 @@ module Gtk
         end
         line = @pipe.readline.chomp
         if match = /^([a-z_]+)=(.+)$/i.match(line)
-          puts line
           key, value = match.captures
           case key
           when 'ID_FILENAME'
-            @info = { :file => value, :width => 0 }
+            @file = { :path => value, :width => 0 }
           when 'ID_LENGTH'
-            @info[:length] = value.to_i
-            signal_emit 'length_changed', @info[:length]
+            @file[:length] = value.to_i
+            signal_emit 'length_changed', @file[:length]
           when 'ID_VIDEO_WIDTH'
-            @info[:width] = value.to_i if value
+            @file[:width] = value.to_i if value
           when 'ID_VIDEO_HEIGHT'
-            if @info[:width] > 0 and (@info[:height] = value.to_f) > 0
-              Gtk.idle { self.ratio = @info[:width] / @info[:height] }
+            if @file[:width] > 0 and (@file[:height] = value.to_f) > 0
+              Gtk.idle { self.ratio = @file[:width] / @file[:height] }
             end
           when 'ID_VIDEO_ASPECT'
             unless (ratio = value.to_f).zero?
@@ -253,26 +338,51 @@ module Gtk
             end
           when /^ID_([a-z_]+)$/i
             if value
-              @info[$1.downcase.to_sym] = value.to_i > 0 ? value.to_i : value
+              @file[$1.downcase.to_sym] = value.to_i > 0 ? value.to_i : value
             end
           when /^ANS_([a-z_]+)$/i
             @answers[$1] = value
           end
         end
       end
+    rescue Exception => exc
+      Gtk.idle { raise exc }
     ensure
-      @pipe.close if @pipe
-      @pipe = nil
-      @thread = nil
-      puts 'thread stopped.'
       signal_emit 'stopped'
     end
-  end
 
-  def self.idle
-    Gtk.idle_add do
-      yield
-      false
+    def draw_background
+      return if thread_alive?
+
+      gc = Gdk::GC.new(window)
+      gc.rgb_fg_color = @bg_color
+      x, y, width, height = allocation.to_a
+      window.draw_rectangle(gc, true, 0, 0, width, height)
+
+      if @bg_stripes and @bg_stripes_color.is_a? Gdk::Color
+        gc.rgb_fg_color = @bg_stripes_color
+        0.step(height, 4) do |y|
+          window.draw_rectangle(gc, true, 0, y, width, 2)
+        end
+      end
+
+      if @bg_logo.is_a? Gdk::Pixbuf
+        lwidth, lheight = @bg_logo.width, @bg_logo.height
+        if lwidth > width or lheight > height
+          xratio = width / lwidth.to_f
+          yratio = height / lheight.to_f
+          ratio = xratio > yratio ? yratio : xratio
+          pixbuf = @bg_logo.scale(lwidth * ratio, lheight * ratio)
+        else
+          pixbuf = @bg_logo
+        end
+
+        x = width / 2 - pixbuf.width / 2
+        y = height / 2 - pixbuf.height / 2
+        window.draw_pixbuf(style.fg_gc(0), pixbuf,
+          0, 0, x, y, pixbuf.width, pixbuf.height, 0, 0, 0)
+      end
+      true
     end
   end
 end
