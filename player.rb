@@ -16,11 +16,15 @@ class Window < Gtk::Window
     self << vbox
 
     @mplayer = Gtk::MPlayerEmbed.new
+    @mplayer.fullscreen_size = [ 1024, 768 ]
     @mplayer.bg_logo = File.join(File.dirname(__FILE__), 'mplayer.png')
     @mplayer.bg_stripes = true
     @mplayer.signal_connect('fullscreen_toggled') do |mplayer, fullscreen|
       vbox.reorder_child(@mplayer, 0) if not fullscreen
     end
+    @mplayer.signal_connect('realize') do
+      @mplayer.play(ARGV)
+    end unless ARGV.empty?
     vbox << @mplayer
 
     hbox = Gtk::HBox.new(false, 4)

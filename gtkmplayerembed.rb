@@ -49,8 +49,7 @@ module Gtk
       'del'       => 'Delete',
     }
 
-    attr_accessor :mplayer_path, :mplayer_options,
-                  :fullscreen_width, :fullscreen_height,
+    attr_accessor :mplayer_path, :mplayer_options, :fullscreen_size,
                   :bg_color, :bg_logo, :bg_stripes, :bg_stripes_color
     attr_reader :config, :file, :playlist
 
@@ -58,8 +57,8 @@ module Gtk
       @mplayer_path = path
       @mplayer_options = options
 
-      @fullscreen_width = Gdk::Screen.default.width
-      @fullscreen_height = Gdk::Screen.default.height
+      @fullscreen_size = [ Gdk::Screen.default.width,
+                           Gdk::Screen.default.height ]
 
       @bg_color = Gdk::Color.parse('black')
       @bg_stripes_color = Gdk::Color.parse('#333')
@@ -130,15 +129,16 @@ module Gtk
 
         screenx = Gdk::Screen.default.width
         screeny = Gdk::Screen.default.height
-        width = @fullscreen_width || screenx
-        height = @fullscreen_height || screeny
+        width = @fullscreen_size[0] || screenx
+        height = @fullscreen_size[1] || screeny
         width = [0, [screenx, width].min].max
         height = [0, [screeny, height].min].max
         align.set_right_padding(screenx - width)
         align.set_bottom_padding(screeny - height)
 
-        @fs_window.show_all
+        align.realize
         reparent(align)
+        @fs_window.show_all
       end
       signal_emit 'fullscreen_toggled', fullscreen?
     end
@@ -181,6 +181,14 @@ module Gtk
     def ratio=(ratio)
       @file[:ratio] = ratio
       @aspect.ratio = ratio
+    end
+
+    def fullscreen_size(size)
+      if size.is_a? Array and size.size == 2
+        @fullscreen_size = size
+      else
+        raise ArgumentError, "invalid size"
+      end
     end
 
     def bg_color=(color)
@@ -326,9 +334,11 @@ module Gtk
             @file[:length] = value.to_i
             signal_emit 'length_changed', @file[:length]
           when 'ID_VIDEO_WIDTH'
-            @file[:width] = value.to_i if value
+            if (width = value.to_i) > 0
+              @file[:width] = width
+            end
           when 'ID_VIDEO_HEIGHT'
-            if @file[:width] > 0 and (@file[:height] = value.to_f) > 0
+            if @file[:width] and (@file[:height] = value.to_f) > 0
               Gtk.idle { self.ratio = @file[:width] / @file[:height] }
             end
           when 'ID_VIDEO_ASPECT'
