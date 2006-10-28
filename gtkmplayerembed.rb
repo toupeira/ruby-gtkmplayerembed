@@ -69,7 +69,7 @@ module Gtk
       load_bindings
 
       super()
-      modify_bg(Gtk::STATE_NORMAL, style.black)
+      modify_bg(Gtk::STATE_NORMAL, @bg_color)
       set_can_focus(true)
       set_size_request(10, 10)
 
@@ -84,9 +84,9 @@ module Gtk
         case command = @bindings[event.keyval]
         when Proc
           command.call
-        when 'vo_fullscreen'
+        when /vo_fullscreen/
           toggle_fullscreen
-        when /^vo_ontop/
+        when /vo_ontop/
           toplevel.keep_above = true if toplevel
         else
           send_command(command) if command
@@ -98,7 +98,7 @@ module Gtk
       self << @aspect
 
       @socket = Gtk::Socket.new
-      @socket.modify_bg(Gtk::STATE_NORMAL, style.black)
+      @socket.modify_bg(Gtk::STATE_NORMAL, @bg_color)
       @aspect << @socket
     end
 
@@ -139,6 +139,7 @@ module Gtk
         align.realize
         reparent(align)
         @fs_window.show_all
+        @aspect.hide unless thread_alive?
       end
       signal_emit 'fullscreen_toggled', fullscreen?
     end
@@ -193,6 +194,8 @@ module Gtk
 
     def bg_color=(color)
       color = Gdk::Color.parse(color) unless color.is_a? Gdk::Color
+      modify_bg(Gtk::STATE_NORMAL, color)
+      @socket.modify_bg(Gtk::STATE_NORMAL, color)
       @bg_color = color
     end
 
