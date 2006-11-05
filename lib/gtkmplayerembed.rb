@@ -49,14 +49,15 @@ module Gtk
       'del'       => 'Delete',
     }
 
-    attr_accessor :mplayer_path, :mplayer_options, :fullscreen_size,
-                  :bg_color, :bg_logo, :bg_stripes, :bg_stripes_color
-    attr_reader :config, :file, :playlist
+    attr_accessor :mplayer_path, :mplayer_options, :bg_stripes
+    attr_reader :config, :file, :playlist, :fullscreen_size,
+                :bg_color, :bg_logo, :bg_stripes_color
 
     def initialize(path='mplayer', options=nil)
       @mplayer_path = path
       @mplayer_options = options
 
+      @fs_window = nil
       @fullscreen_size = [ Gdk::Screen.default.width,
                            Gdk::Screen.default.height ]
 
@@ -103,7 +104,7 @@ module Gtk
     end
 
     def fullscreen?
-      @fs_window and toplevel == @fs_window
+      @fs_window.is_a? Gtk::Window and toplevel == @fs_window
     end
 
     def fullscreen=(status)
@@ -184,7 +185,7 @@ module Gtk
       @aspect.ratio = ratio
     end
 
-    def fullscreen_size(size)
+    def fullscreen_size=(size)
       if size.is_a? Array and size.size == 2
         @fullscreen_size = size
       else
@@ -204,7 +205,7 @@ module Gtk
       @bg_logo = logo
     end
 
-    def bg_stripes_color(color)
+    def bg_stripes_color=(color)
       color = Gdk::Color.parse(color) unless color.is_a? Gdk::Color
       @bg_stripes_color = color
     end
