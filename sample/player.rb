@@ -1,11 +1,12 @@
 #!/usr/bin/env ruby
 
-require 'gtkmplayerembed'
+$DEBUG = true
+require '../lib/gtkmplayerembed'
 
-class Window < Gtk::Window
+class Demo < Gtk::Window
   def initialize
     super
-    set_title('Gtk::MPlayerEmbed')
+    set_title('Gtk::MPlayerEmbed Demo')
     set_default_size(400, 300)
     signal_connect('delete-event') do
       @mplayer.kill_thread
@@ -79,5 +80,5 @@ class Window < Gtk::Window
   end
 end
 
-Window.new
+Demo.new
 Gtk.main

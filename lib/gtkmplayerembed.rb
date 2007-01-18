@@ -25,6 +25,8 @@ module Gtk
       GLib::Signal::RUN_FIRST, nil, GLib::Type['void']
     signal_new 'file_changed',
       GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], String
+    signal_new 'properties_changed',
+      GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], Hash
     signal_new 'playlist_changed',
       GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], Array
     signal_new 'length_changed',
@@ -32,8 +34,8 @@ module Gtk
     signal_new 'fullscreen_toggled',
       GLib::Signal::RUN_FIRST, nil, GLib::Type['void'], TrueClass
 
-    INPUT_PATHS = [ ENV['HOME'] + '/.mplayer/input.conf',
-                    '/etc/mplayer/input.conf', ]
+    INPUT_PATHS = [ "#{ENV['HOME']}/.mplayer/input.conf",
+                    "/etc/mplayer/input.conf" ]
     KEYNAMES = {
       'space'     => 'space',
       'bs'        => 'BackSpace',
@@ -74,14 +76,13 @@ module Gtk
       set_can_focus(true)
       set_size_request(10, 10)
 
-      signal_connect('realize') { @aspect.hide }
+      signal_connect('show') { @aspect.hide unless thread_alive? }
       signal_connect('expose-event') { draw_background }
       signal_connect('enter-notify-event') { grab_focus }
       signal_connect('button-press-event') do |w, event|
         toggle_fullscreen if event.button == 3
       end
       signal_connect('key-press-event') do |w, event|
-        puts "#{Gdk::Keyval.to_name event.keyval} => #{event.keyval}" if $DEBUG
         case command = @bindings[event.keyval]
         when Proc
           command.call
@@ -128,12 +129,9 @@ module Gtk
         align = Gtk::Alignment.new(0, 0, 1, 1)
         @fs_window << align
 
-        screenx = Gdk::Screen.default.width
-        screeny = Gdk::Screen.default.height
-        width = @fullscreen_size[0] || screenx
-        height = @fullscreen_size[1] || screeny
-        width = [0, [screenx, width].min].max
-        height = [0, [screeny, height].min].max
+        screenx, screeny = Gdk.screen_width, Gdk.screen_height
+        width = [ 320, [ screenx, @fullscreen_size[0] ].min ].max
+        height = [ 240, [ screeny, @fullscreen_size[1] ].min ].max
         align.set_right_padding(screenx - width)
         align.set_bottom_padding(screeny - height)
 
@@ -161,8 +159,47 @@ module Gtk
       send_command :quit
     end
 
+    def next(step=1)
+      send_command :pt_step => step
+    end
+
+    def previous(step=1)
+      send_command :pt_step => -step
+    end
+
+    def seek(step)
+      send_command :seek => step, :pausing => 'keep'
+    end
+
+    [ :pause, :mute, :switch_audio ].each do |cmd|
+      define_method(cmd) { send_command cmd }
+    end
+
+    def add_binding(key, command=nil, &block)
+      if key.size == 1
+        keyval = Gdk::Keyval.from_unicode(key)
+      elsif name = KEYNAMES[key.downcase]
+        keyval = Gdk::Keyval.from_name(name)
+      elsif (keyval = Gdk::Keyval.from_name(key)).zero?
+        keyval = Gdk::Keyval.from_name(key.capitalize)
+      end
+
+      if keyval > 0
+        command = block ? block : command
+        raise "no command or block given." unless command
+      else
+        debug "couldn't find keycode for #{key.inspect}"
+      end
+
+      @bindings[keyval] = command
+    end
+
     def show_text(text, time=2000)
       send_command :osd_show_text => [ text, time ], :pausing => 'keep'
+    end
+
+    def thread_alive?
+      @thread and @pipe.flush and true rescue false
     end
 
     def kill_thread
@@ -170,10 +207,6 @@ module Gtk
       @thread.join if @thread
       @thread = nil
       @pipe = nil
-    end
-
-    [ :pause, :mute, :switch_audio ].each do |cmd|
-      define_method(cmd) { send_command cmd }
     end
 
     def ratio
@@ -185,8 +218,9 @@ module Gtk
       @aspect.ratio = ratio
     end
 
-    def fullscreen_size=(size)
-      if size.is_a? Array and size.size == 2
+    def fullscreen_size=(*size)
+      size.flatten!
+      if size.size == 2 and size.all? { |i| i.is_a? Integer }
         @fullscreen_size = size
       else
         raise ArgumentError, "invalid size"
@@ -220,7 +254,7 @@ module Gtk
           value.each do |key, value|
             case key
             when :open
-              open_thread
+              open_thread if value
             when :pausing
               command = if value.is_a? String
                 "pausing_#{value} #{command}"
@@ -236,7 +270,7 @@ module Gtk
       end
       raise ArgumentError, "invalid arguments" unless command
       if thread_alive?
-        puts "sending #{command.inspect}"
+        debug "sending #{command.inspect}"
         @pipe.write "#{command}\n"
       end
     end
@@ -251,8 +285,12 @@ module Gtk
 
   private
 
+    def debug(message)
+      puts "[Gtk::MPlayerEmbed::#{$$}] #{message}" if $DEBUG
+    end
+
     def signal_do_stopped
-      puts 'thread stopped.'
+      debug "#{@thread.inspect} stopped"
       @pipe = nil
       @thread = nil
       @file = {}
@@ -262,6 +300,7 @@ module Gtk
     end
 
     def signal_do_file_changed(file) end
+    def signal_do_properties_changed(properties) end
     def signal_do_playlist_changed(playlist) end
     def signal_do_length_changed(length) end
     def signal_do_fullscreen_toggled(fullscreen) end
@@ -273,12 +312,14 @@ module Gtk
 
     def load_bindings
       if file = INPUT_PATHS.find { |f| File.readable? f }
+        debug "reading bindings from #{file}"
         File.readlines(file).each do |line|
           if line =~ /^([^# ]+) (.+)$/
             add_binding($1, $2)
           end
         end
       end
+
       add_binding('i') do
         next unless @file[:path]
         pos = format_time(read_command(:get_time_pos, 'TIME_POSITION'))
@@ -286,25 +327,10 @@ module Gtk
         percent = read_command(:get_percent_pos, 'PERCENT_POSITION')
         show_text "#{File.basename(@file[:path])}   #{pos} / #{length}   (#{percent}%)"
       end
+
       add_binding('c') do
         show_text Time.now.strftime('%T')
       end
-    end
-
-    def add_binding(key, command=nil, &block)
-      if key.size == 1
-        keyval = Gdk::Keyval.from_unicode(key)
-      elsif name = KEYNAMES[key.downcase]
-        keyval = Gdk::Keyval.from_name(name)
-      elsif (keyval = Gdk::Keyval.from_name(key)).zero?
-        keyval = Gdk::Keyval.from_name(key.capitalize)
-      end
-      command = block ? block : command
-      @bindings[keyval] = command if keyval > 0
-    end
-
-    def thread_alive?
-      @thread and @pipe.flush and true rescue false
     end
 
     def open_thread(options=nil)
@@ -315,25 +341,31 @@ module Gtk
       cmd = "#{@mplayer_path} -slave -quiet -identify " +
             "-wid #{@socket.id} -geometry #{x}x#{y} " +
             "#{options} #{@mplayer_options}"
-      puts @pipe
+      debug "running thread with #{cmd.inspect}"
       @thread = Thread.new { slave_reader(cmd) }
     end
 
     def slave_reader(command)
       @answers = {}
-      puts "opening slave with #{command}"
       @pipe = IO.popen(command, 'a+')
       until @pipe.eof? or @pipe.closed?
         if @aspect.nil? or @aspect.destroyed?
           kill_slave
           break
         end
+
         line = @pipe.readline.chomp
-        if match = /^([a-z_]+)=(.+)$/i.match(line)
+        if line == 'Starting playback...'
+          signal_emit('properties_changed', @file)
+        elsif match = /^([a-z_ ]+)[=:](.+)$/i.match(line)
           key, value = match.captures
+          key.strip!
+          value.strip!
+
           case key
           when 'ID_FILENAME'
             @file = { :path => value, :width => 0 }
+            signal_emit 'file_changed', value
           when 'ID_LENGTH'
             @file[:length] = value.to_i
             signal_emit 'length_changed', @file[:length]
@@ -347,16 +379,28 @@ module Gtk
             end
           when 'ID_VIDEO_ASPECT'
             unless (ratio = value.to_f).zero?
-              puts "changing aspect ratio to #{ratio}"
+              debug "changing aspect ratio to #{ratio}"
               Gtk.idle { self.ratio = ratio }
             end
-          when /^ID_([a-z_]+)$/i
+          when /^ID_(\w+)$/
             if value
-              @file[$1.downcase.to_sym] = value.to_i > 0 ? value.to_i : value
+              @file[$1.downcase.intern] = case value
+                when /^\d+$/: value.to_i
+                when /^\d+\.\d+$/: value.to_f
+                else value
+              end
             end
-          when /^ANS_([a-z_]+)$/i
+          when /^ANS_(\w+)$/
             @answers[$1] = value
+          when /^Language$/
+            @file[:language] = value[/^([^\[]+)/, 1] || value
+          when /^Selected (audio|video) codec$/
+            @file["#{$1}_codec".intern] = value[/\((.*)\)/, 1] || value
+          else
+            debug "didn't recognize #{key.inspect} => #{value.inspect}"
+            next
           end
+          debug "recognized #{key.inspect} => #{value.inspect}"
         end
       end
     rescue Exception => exc
@@ -398,5 +442,12 @@ module Gtk
       end
       true
     end
+
+    (instance_methods - superclass.instance_methods) \
+      .grep(/=$/).map { |i| i.chop! } \
+      .each do |attr|
+        alias_method "get_#{attr}", "#{attr}" if method_defined?("#{attr}")
+        alias_method "set_#{attr}", "#{attr}="
+      end
   end
 end
