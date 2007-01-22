@@ -77,8 +77,9 @@ module Gtk
       set_size_request(10, 10)
 
       signal_connect('show') { @aspect.hide unless thread_alive? }
-      signal_connect('expose-event') { draw_background }
+      signal_connect('expose-event') { draw_background unless thread_alive? }
       signal_connect('enter-notify-event') { grab_focus }
+
       signal_connect('button-press-event') do |w, event|
         toggle_fullscreen if event.button == 3
       end
@@ -102,6 +103,8 @@ module Gtk
       @socket = Gtk::Socket.new
       @socket.modify_bg(Gtk::STATE_NORMAL, @bg_color)
       @aspect << @socket
+
+      at_exit { kill_thread }
     end
 
     def fullscreen?
@@ -374,8 +377,8 @@ module Gtk
               @file[:width] = width
             end
           when 'ID_VIDEO_HEIGHT'
-            if @file[:width] and (@file[:height] = value.to_f) > 0
-              Gtk.idle { self.ratio = @file[:width] / @file[:height] }
+            if @file[:width] and (@file[:height] = value.to_i) > 0
+              Gtk.idle { self.ratio = @file[:width].to_f / @file[:height] }
             end
           when 'ID_VIDEO_ASPECT'
             unless (ratio = value.to_f).zero?
@@ -410,8 +413,6 @@ module Gtk
     end
 
     def draw_background
-      return if thread_alive?
-
       gc = Gdk::GC.new(window)
       gc.rgb_fg_color = @bg_color
       x, y, width, height = allocation.to_a
