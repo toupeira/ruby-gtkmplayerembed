@@ -12,6 +12,7 @@
 =end
 
 require 'rake/testtask'
+require 'rake/rdoctask'
 begin
   require 'rubygems'
   require 'rake/gempackagetask'
@@ -41,4 +42,13 @@ if defined? Gem
     spec.files = FileList['{{lib,test,sample}/**/*,[A-Z]*}']
   end
   Rake::GemPackageTask.new(spec).define
+end
+
+desc 'Generate documentation.'
+Rake::RDocTask.new(:doc) do |rdoc|
+  rdoc.rdoc_dir = 'doc'
+  rdoc.title    = 'Gtk::MPlayerEmbed'
+  rdoc.options << '--all' << '--line-numbers' << '--inline-source'
+  rdoc.rdoc_files.include('README')
+  rdoc.rdoc_files.include('lib/*.rb')
 end

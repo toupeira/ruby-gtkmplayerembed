@@ -1,6 +1,5 @@
 #!/usr/bin/env ruby
 
-$DEBUG = true
 require '../lib/gtkmplayerembed'
 
 class Demo < Gtk::Window
