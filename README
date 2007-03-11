@@ -28,7 +28,7 @@ See the sample player and the RDoc documentation for some examples.
 == Bugs
 
 I only tested this on Linux with Ruby 1.8.5, Ruby/GTK 0.15 and GTK 2.10.
-MPLayer video output only works correctly with xv, sdl creates another window,
+MPlayer video output only works correctly with xv, sdl creates another window,
 and x11, gl and gl2 don't scale to the available space.
 
 If the Ruby interpreter dies because of a GTK crash or something, an
