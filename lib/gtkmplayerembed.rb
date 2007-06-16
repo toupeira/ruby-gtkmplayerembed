@@ -14,6 +14,14 @@
 require 'gtk2'
 require 'tempfile'
 
+class String
+  unless method_defined? :escape_shell
+    def escape_shell
+      "\"#{self.gsub '"', '\\"'}\""
+    end
+  end
+end
+
 module Gtk #:nodoc:
   def self.idle
     Gtk.idle_add { yield; false }
@@ -55,7 +63,7 @@ module Gtk #:nodoc:
     }
 
     # Information about the currently playing file.
-    attr_reader :file
+    attr_reader :current
 
     # List of currently playing files.
     attr_reader :playlist
@@ -85,10 +93,9 @@ module Gtk #:nodoc:
       props = nil; new.instance_eval do
         signal_connect('properties_changed') do |s, props|
           kill_thread
-          break
         end
         slave_reader "mplayer -quiet -identify -vo null -vc null" +
-                     " -frames 0 #{file.inspect}"
+                     " -frames 0 #{file.escape_shell}"
       end; props
     end
 
@@ -106,7 +113,7 @@ module Gtk #:nodoc:
       @bg_color = Gdk::Color.parse('black')
       @bg_stripes_color = Gdk::Color.parse('#333')
 
-      @file = {}
+      @current = {}
       @answers = {}
       @bindings = {}
       load_bindings
@@ -200,7 +207,7 @@ module Gtk #:nodoc:
     # Set the aspect ratio.
     def ratio=(ratio)
       debug "changing aspect ratio to #{ratio}"
-      @file[:ratio] = ratio
+      @current[:ratio] = ratio
       @aspect.ratio = ratio
     end
 
@@ -339,7 +346,7 @@ module Gtk #:nodoc:
                 "pausing #{command}"
               end
             else
-              args = Array(value).map { |a| a.inspect }.join ' '
+              args = Array(value).map { |a| a.escape_shell }.join ' '
               command = "#{key} #{args}"
             end
           end
@@ -364,7 +371,7 @@ module Gtk #:nodoc:
 
     # Check if the MPlayer thread is still alive and responsive.
     def thread_alive?
-      @thread and @pipe.flush and true rescue false
+      @thread and @pipe and @pipe.flush and true rescue false
     end
 
     # Kill the MPlayer thread forcibly.
@@ -388,7 +395,7 @@ module Gtk #:nodoc:
       debug "#{@thread.inspect} stopped" if @thread
       @pipe = nil
       @thread = nil
-      @file = {}
+      @current = {}
 
       @aspect.hide
       toggle_fullscreen if fullscreen?
@@ -396,7 +403,7 @@ module Gtk #:nodoc:
 
     # Reset file information.
     def signal_do_file_changed(file)
-      @file = { :path => file }
+      @current = { :path => file }
     end
 
     # Gets fired when the file is fully loaded. <tt>properties</tt> contains
@@ -428,7 +435,7 @@ module Gtk #:nodoc:
       if file = INPUT_PATHS.find { |f| File.readable? f }
         debug "reading bindings from #{file}"
         File.readlines(file).each do |line|
-          if line =~ /^([^# ]+) (.+)$/
+          if line =~ /^((?!MOUSE.*)[^# ]+) (.+)$/
             add_binding($1, $2)
           end
         end
@@ -436,11 +443,11 @@ module Gtk #:nodoc:
 
       # Display some information when 'i' is pressed.
       add_binding('i') do
-        next unless @file[:path]
+        next unless @current[:path]
         pos = format_time(read_command(:get_time_pos, 'TIME_POSITION'))
-        length = format_time(@file[:length])
+        length = format_time(@current[:length])
         percent = read_command(:get_percent_pos, 'PERCENT_POSITION')
-        show_text "#{File.basename(@file[:path])}   #{pos} / #{length}   (#{percent}%)"
+        show_text "#{File.basename(@current[:path])}   #{pos} / #{length}   (#{percent}%)"
       end
 
       # Display the current time when 'c' is pressed.
@@ -468,7 +475,7 @@ module Gtk #:nodoc:
       @answers = {}
       @pipe = IO.popen(command, 'a+')
 
-      until @pipe.eof? or @pipe.closed?
+      until @pipe.nil? or @pipe.closed? or @pipe.eof?
         if @aspect.nil? or @aspect.destroyed?
           # Exit if parent widget is destroyed.
           kill_slave
@@ -477,7 +484,7 @@ module Gtk #:nodoc:
 
         line = @pipe.readline.chomp
         if line == 'Starting playback...'
-          signal_emit('properties_changed', @file)
+          signal_emit('properties_changed', @current)
         elsif match = /^([a-z_ ]+)[=:](.+)$/i.match(line)
           key, value = match.captures
           key.strip!
@@ -487,27 +494,27 @@ module Gtk #:nodoc:
           when 'ID_FILENAME'
             signal_emit 'file_changed', value
           when 'ID_LENGTH'
-            @file[:length] = value.to_i
-            signal_emit 'length_changed', @file[:length]
+            @current[:length] = value.to_i
+            signal_emit 'length_changed', @current[:length]
           when 'ID_VIDEO_WIDTH'
             if (width = value.to_i) > 0
-              @file[:width] = width
+              @current[:width] = width
             end
           when 'ID_VIDEO_HEIGHT'
             if (height = value.to_i) > 0
-              @file[:height] = height
+              @current[:height] = height
             end
           when 'ID_VIDEO_ASPECT'
             if (ratio = value.to_f).zero?
-              if @file[:width] and @file[:height]
-                ratio = @file[:width].to_f / @file[:height]
+              if @current[:width] and @current[:height]
+                ratio = @current[:width].to_f / @current[:height]
               end
             end
             Gtk.idle { self.ratio = ratio } unless ratio.zero?
           when /^ID_(\w+)$/
             # Unknown values, try to make them a bit useful.
             if value
-              @file[$1.downcase.intern] = case value
+              @current[$1.downcase.intern] = case value
                 when /^\d+$/: value.to_i
                 when /^\d+\.\d+$/: value.to_f
                 else value
@@ -517,9 +524,9 @@ module Gtk #:nodoc:
             # Collect responses from special commands.
             @answers[$1] = value
           when /^Language$/
-            @file[:language] = value[/^([^\[]+)/, 1] || value
+            @current[:language] = value[/^([^\[]+)/, 1] || value
           when /^Selected (audio|video) codec$/
-            @file["#{$1}_codec".intern] = value[/\((.*)\)/, 1] || value
+            @current["#{$1}_codec".intern] = value[/\((.*)\)/, 1] || value
           else
             next
           end
