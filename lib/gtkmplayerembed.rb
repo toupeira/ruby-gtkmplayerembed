@@ -289,7 +289,7 @@ module Gtk #:nodoc:
     end
 
     # Show text in the MPlayer OSD.
-    def show_text(text, time=2000)
+    def show_text(text, time=3000)
       send_command :osd_show_text => [ text, time ], :pausing => 'keep'
     end
 
@@ -327,7 +327,9 @@ module Gtk #:nodoc:
     # send_command :pause
     # send_command :loadfile => @path
     #
-    # Arguments passed in a hash will be automatically escpaped.
+    # Arguments passed in a hash will be automatically escaped.
+    # You can also pass <tt>:open => true</tt> to start MPlayer if
+    # necessary.
     def send_command(*args)
       command = nil
       args.each do |value|
@@ -346,7 +348,9 @@ module Gtk #:nodoc:
                 "pausing #{command}"
               end
             else
-              args = Array(value).map { |a| a.escape_shell }.join ' '
+              args = Array(value).map do |a|
+                a.is_a?(String) ? a.escape_shell : a.inspect
+              end.join(' ')
               command = "#{key} #{args}"
             end
           end
@@ -435,7 +439,7 @@ module Gtk #:nodoc:
       if file = INPUT_PATHS.find { |f| File.readable? f }
         debug "reading bindings from #{file}"
         File.readlines(file).each do |line|
-          if line =~ /^((?!MOUSE.*)[^# ]+) (.+)$/
+          if line =~ /^((?!MOUSE.*|.*menu.*)[^# ]+) (.+)$/
             add_binding($1, $2)
           end
         end
