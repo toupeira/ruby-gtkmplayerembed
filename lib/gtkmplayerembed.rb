@@ -89,14 +89,49 @@ module Gtk #:nodoc:
     # The color used for the background stripes.
     attr_accessor :bg_stripes_color
 
-    def self.identify(file)
-      props = nil; new.instance_eval do
-        signal_connect('properties_changed') do |s, props|
-          kill_thread
+    def self.parse_property(line)
+      if line =~ /^([a-z_ ]+)[=:](.+)$/i
+        key, value = $1.strip, $2.strip
+
+        case key
+        when /^ID_(\w+)$/
+          key = $1
+          key = $1 if key =~ /^VIDEO_(WIDTH|HEIGHT)$/
+        when 'Language'
+          value = value[/^([^\[]+)/, 1] || value
+        when /^Selected (audio|video) codec$/
+          key = "#{$1}_codec"
+          value = value[/\((.*)\)/, 1] || value
+        else
+          return nil
         end
-        slave_reader "mplayer -quiet -identify -vo null -vc null" +
-                     " -frames 0 #{file.escape_shell}"
-      end; props
+
+        key = key.downcase.intern
+        value = value.to_i if value =~ /^\d+$/
+        value = value.to_f if value =~ /^\d+\.\d+$/
+
+        if value == 0 or value.is_a?(String) && value.empty?
+          return nil
+        else
+          return [ key, value ]
+        end
+      end
+    end
+
+    def self.identify(file)
+      file = file.escape_shell
+      debug "identifying #{file}"
+      command = "mplayer -quiet -identify -vo null -ao null -frames 0 #{file}"
+      @pipe = IO.popen(command, 'r')
+
+      @info = {}
+      until @pipe.eof?
+        if property = parse_property(@pipe.readline)
+          key, value = property
+          @info[key] = value
+        end
+      end
+      @info
     end
 
     # Create a new instance. By default, 'mplayer' will be searched for in
@@ -389,8 +424,12 @@ module Gtk #:nodoc:
   private
 
     # Log a message in debug mode.
-    def debug(message)
+    def self.debug(message)
       puts "[Gtk::MPlayerEmbed::#{$$}] #{message}" if $DEBUG
+    end
+
+    def debug(message)
+      MPlayerEmbed.debug(message)
     end
 
     # The <tt>stopped</tt> signal is fired after the MPlayer thread has
@@ -489,52 +528,29 @@ module Gtk #:nodoc:
         line = @pipe.readline.chomp
         if line == 'Starting playback...'
           signal_emit('properties_changed', @current)
-        elsif match = /^([a-z_ ]+)[=:](.+)$/i.match(line)
-          key, value = match.captures
-          key.strip!
-          value.strip!
+        elsif line =~ /^ANS_(\w+)$/
+          # Collect responses from special commands.
+          @answers[$1] = value
+        elsif property = MPlayerEmbed.parse_property(line)
+          # Collect file properties
+          key, value = property
+          @current[key] = value
 
           case key
-          when 'ID_FILENAME'
+          when :filename
             signal_emit 'file_changed', value
-          when 'ID_LENGTH'
-            @current[:length] = value.to_i
-            signal_emit 'length_changed', @current[:length]
-          when 'ID_VIDEO_WIDTH'
-            if (width = value.to_i) > 0
-              @current[:width] = width
+          when :length
+            signal_emit 'length_changed', value
+          when :video_height
+            unless @current[:video_aspect]
+              # Calculate fallback aspect ratio from width and height
+              ratio = @current[:video_width] / @current[:video_height].to_f
+              Gtk.idle { self.ratio = ratio }
             end
-          when 'ID_VIDEO_HEIGHT'
-            if (height = value.to_i) > 0
-              @current[:height] = height
-            end
-          when 'ID_VIDEO_ASPECT'
-            if (ratio = value.to_f).zero?
-              if @current[:width] and @current[:height]
-                ratio = @current[:width].to_f / @current[:height]
-              end
-            end
-            Gtk.idle { self.ratio = ratio } unless ratio.zero?
-          when /^ID_(\w+)$/
-            # Unknown values, try to make them a bit useful.
-            if value
-              @current[$1.downcase.intern] = case value
-                when /^\d+$/: value.to_i
-                when /^\d+\.\d+$/: value.to_f
-                else value
-              end
-            end
-          when /^ANS_(\w+)$/
-            # Collect responses from special commands.
-            @answers[$1] = value
-          when /^Language$/
-            @current[:language] = value[/^([^\[]+)/, 1] || value
-          when /^Selected (audio|video) codec$/
-            @current["#{$1}_codec".intern] = value[/\((.*)\)/, 1] || value
-          else
-            next
+          when :video_aspect
+            # Use requested aspect ratio
+            Gtk.idle { self.ratio = value }
           end
-          debug "recognized #{key.inspect} => #{value.inspect}"
         end
       end
     rescue Exception => exc
