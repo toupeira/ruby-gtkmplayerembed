@@ -353,13 +353,15 @@ module Gtk #:nodoc:
 
     # Send a command to the MPlayer thread.
     # See <tt>mplayer -input cmdlist</tt> for a list of all commands and
-    # arguments.
+    # arguments, and the MPlayer documentation for their description.
     #
     # Commands can be specified either by Strings, Symbols, or as a Hash
     # with options.  Examples:
     #
     # send_command 'seek 10'
+    #
     # send_command :pause
+    #
     # send_command :loadfile => @path
     #
     # Arguments passed in a hash will be automatically escaped.
