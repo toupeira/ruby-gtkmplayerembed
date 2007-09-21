@@ -192,11 +192,23 @@ module Gtk #:nodoc:
     end
 
     # Play on or more files, pass a String or an Array.
-    def play(files)
-      signal_emit 'playlist_changed', @playlist = Array(files)
+    def play(*files)
+      files.flatten!
+      files.delete_if { |f| !f.is_a? String or !File.file? f }
+      raise ArgumentError if files.empty?
+
+      # Make sure all paths are absolute
+      @playlist = files.map do |file|
+        file[0, 1] == '/' ? file : "#{Dir.pwd}/#{file}"
+      end
+      signal_emit 'playlist_changed', @playlist
+
+      # Pass files in a playlist, so we don't have
+      # to deal with filename issues.
       @tmp = Tempfile.new('gtkmplayerembed')
       @playlist.each { |f| @tmp.write("#{f}\n") }
       @tmp.close
+
       if thread_alive?
         send_command :loadlist => @tmp.path
       else
