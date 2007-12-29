@@ -96,7 +96,7 @@ module Gtk #:nodoc:
         case key
         when /^ID_(\w+)$/
           key = $1
-          key = $1 if key =~ /^VIDEO_(WIDTH|HEIGHT)$/
+          key = $1 if key =~ /^VIDEO_(WIDTH|HEIGHT|ASPECT)$/
         when 'Language'
           value = value[/^([^\[]+)/, 1] || value
         when /^Selected (audio|video) codec$/
@@ -555,13 +555,13 @@ module Gtk #:nodoc:
             signal_emit 'file_changed', value
           when :length
             signal_emit 'length_changed', value
-          when :video_height
-            unless @current[:video_aspect]
+          when :width, :height
+            if @current[:aspect].nil? and @current[:width] and @current[:height]
               # Calculate fallback aspect ratio from width and height
-              ratio = @current[:video_width] / @current[:video_height].to_f
+              ratio = @current[:width] / @current[:height].to_f
               Gtk.idle { self.ratio = ratio }
             end
-          when :video_aspect
+          when :aspect
             # Use requested aspect ratio
             Gtk.idle { self.ratio = value }
           end
