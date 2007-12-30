@@ -137,9 +137,9 @@ module Gtk #:nodoc:
     # Create a new instance. By default, 'mplayer' will be searched for in
     # <tt>$PATH</tt>, use <tt>path</tt> to specify an explicit executable
     # and <tt>options</tt> to pass command-line arguments.
-    def initialize(path='mplayer', options=nil)
-      @mplayer_path = path
-      @mplayer_options = options
+    def initialize(path=nil, options=nil)
+      @mplayer_path = path || 'mplayer'
+      @mplayer_options = options.to_s
 
       @thread = @pipe = @fs_window = nil
       @fullscreen_size = [ Gdk::Screen.default.width,
