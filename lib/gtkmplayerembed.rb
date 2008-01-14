@@ -427,7 +427,7 @@ module Gtk #:nodoc:
       @thread and @pipe and @pipe.flush and true rescue false
     end
 
-    # Kill the MPlayer thread forcibly.
+    # Kill the MPlayer thread, and make sure it really is dead.
     def kill_thread
       Process.kill 'INT', @pipe.pid if thread_alive?
       @thread.join if @thread
