@@ -33,22 +33,13 @@ end
 if defined? Gem
   spec = Gem::Specification.new do |spec|
     spec.name = 'gtkmplayerembed'
-    spec.version = '0.1.0'
+    spec.version = '0.1.1'
     spec.author = 'Markus Koller'
-    spec.email = 'toupeira@gmx.ch'
-    spec.homepage = 'http://snafu.selfip.org/software/gtkmplayerembed/'
+    spec.email = 'markus-koller@gmx.ch'
+    spec.homepage = 'http://github.com/toupeira/gtkmplayerembed/'
     spec.platform = Gem::Platform::RUBY
     spec.summary = 'A widget for embedding MPlayer into GTK+ applications'
     spec.files = FileList['{{lib,test,sample}/**/*,[A-Z]*}']
   end
   Rake::GemPackageTask.new(spec).define
-end
-
-desc 'Generate documentation.'
-Rake::RDocTask.new(:doc) do |rdoc|
-  rdoc.rdoc_dir = 'doc'
-  rdoc.title    = 'Gtk::MPlayerEmbed'
-  rdoc.options << '--all' << '--line-numbers' << '--inline-source'
-  rdoc.rdoc_files.include('README')
-  rdoc.rdoc_files.include('lib/*.rb')
 end
