@@ -563,7 +563,8 @@ module Gtk #:nodoc:
             end
           when :aspect
             # Use requested aspect ratio
-            Gtk.idle { self.ratio = value }
+            ratio  = value.to_f
+            Gtk.idle { self.ratio = ratio } if ratio > 0
           end
         end
       end

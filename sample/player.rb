@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
-require '../lib/gtkmplayerembed'
+require 'pathname'
+require "#{Pathname.new(__FILE__).realpath.parent}/../lib/gtkmplayerembed"
 
 class Demo < Gtk::Window
   def initialize
