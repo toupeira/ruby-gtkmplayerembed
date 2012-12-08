@@ -9,6 +9,8 @@
 
   $Id$
 
+  Modified by Tiago Justino (4th December 2012)
+
 =end
 
 require 'gtk2'
@@ -346,7 +348,8 @@ module Gtk #:nodoc:
     # action.
     def add_binding(key, command=nil, &block)
       if key.size == 1
-        keyval = Gdk::Keyval.from_unicode(key)
+#        keyval = Gdk::Keyval.from_unicode(key)
+        keyval = Gdk::Keyval.from_unicode(key.codepoints.first)
       elsif name = KEYNAMES[key.downcase]
         keyval = Gdk::Keyval.from_name(name)
       elsif (keyval = Gdk::Keyval.from_name(key)).zero?
@@ -610,7 +613,7 @@ module Gtk #:nodoc:
 
     # Alias some getters and setters.
     (instance_methods - superclass.instance_methods) \
-      .grep(/=$/).map { |i| i.chop! } \
+      .grep(/=$/).map { |i| i.to_s.chop! } \
       .each do |attr|
         alias_method "get_#{attr}", "#{attr}" if method_defined?("#{attr}")
         alias_method "set_#{attr}", "#{attr}="
